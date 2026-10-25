@@ -5,24 +5,28 @@ import pandas as pd
 st.set_page_config(page_title="Verdikt Pro | Polymarket UFC Terminal", page_icon="📈", layout="wide")
 
 # =========================================================================
-# DATA LOADER (Bulk CSV + Manual Overrides)
+# SMART CSV PARSER (Extracts fighters from the fight-by-fight dataset)
 # =========================================================================
 @st.cache_data
-def load_fighter_data():
+def load_fighter_database():
     try:
-        df = pd.read_csv("ufc_fighters_cleaned.csv")
+        df_fights = pd.read_csv("ufc_fighters_cleaned.csv")
+        
+        # Extract unique fighters from f_1_name and f_2_name
+        fighters = pd.concat([df_fights['f_1_name'], df_fights['f_2_name']]).dropna().unique()
+        fighters = sorted([str(f).strip() for f in fighters if str(f).strip() != ""])
+        
+        # Build a robust default lookup dictionary for them
         roster = {}
-        for _, row in df.iterrows():
-            roster[str(row['fighter_name'])] = {
-                "elo": float(row.get('elo', 1600)), "age": float(row.get('age', 28.0)),
-                "reach": float(row.get('reach', 70.0)), "dmg_ratio": float(row.get('dmg_ratio', 1.20)),
-                "slpm": float(row.get('SLpM', 4.0)), "td": float(row.get('TD', 1.5)),
-                "cardio": float(row.get('Cardio', 0.0)), "layoff": float(row.get('Layoff', 180)),
-                "cardio_nan": bool(row.get('CardioNan', False)), "short_notice": bool(row.get('ShortNotice', False))
+        for name in fighters:
+            roster[name] = {
+                "elo": 1700.0, "age": 29.0, "reach": 70.0, "dmg_ratio": 1.30,
+                "slpm": 4.50, "td": 1.50, "cardio": 0.0, "layoff": 150.0,
+                "cardio_nan": False, "short_notice": False
             }
         return roster
-    except Exception:
-        # Pre-loaded baseline for UFC 336 (January 2027)
+    except Exception as e:
+        # Fallback dictionary if file has any issue
         return {
             "Joshua Van": {"elo": 1735, "age": 24.5, "reach": 67.0, "dmg_ratio": 1.48, "slpm": 7.40, "td": 0.50, "cardio": 3.2, "layoff": 110, "cardio_nan": False, "short_notice": False},
             "Manel Kape": {"elo": 1755, "age": 32.5, "reach": 68.0, "dmg_ratio": 1.68, "slpm": 4.85, "td": 1.10, "cardio": -2.2, "layoff": 140, "cardio_nan": False, "short_notice": False},
@@ -30,7 +34,8 @@ def load_fighter_data():
             "Michael Morales": {"elo": 1790, "age": 26.9, "reach": 79.0, "dmg_ratio": 1.75, "slpm": 5.20, "td": 1.40, "cardio": 1.5, "layoff": 100, "cardio_nan": False, "short_notice": False}
         }
 
-roster = load_fighter_data()
+roster = load_fighter_database()
+fighter_list = list(roster.keys())
 
 # Sidebar Controls
 st.sidebar.title("📈 Portfolio & Mode Controls")
@@ -67,42 +72,45 @@ def calculate_polymarket_kelly(model_prob: float, share_price_cents: float, bank
     return {"edge": edge, "bet_pct": bet_pct, "investment": investment, "shares": shares}
 
 st.title("🎯 Verdikt UFC Quant Terminal")
-st.markdown(f"**Current Mode:** `{mode}` — Evaluate true probabilities before Polymarket lines open.")
+st.markdown(f"**Current Mode:** `{mode}` — Search any fighter from your database and adjust metrics.")
 
 col1, col2 = st.columns(2)
 
-def render_fighter(col, label, default_idx):
+def render_fighter_search_column(col, corner_label: str, default_idx: int):
     with col:
-        st.subheader(label)
-        fighter_names = list(roster.keys())
-        choice = st.selectbox(f"Select {label}", fighter_names, index=min(default_idx, len(fighter_names)-1), key=f"sel_{label}")
-        preset = roster[choice]
+        st.subheader(corner_label)
+        selected_name = st.selectbox(f"Search Roster ({corner_label})", fighter_list, index=min(default_idx, len(fighter_list)-1), key=f"search_{corner_label}")
         
-        name = st.text_input("Fighter Name", value=choice, key=f"name_{label}")
+        preset = roster.get(selected_name, {"elo": 1700.0, "age": 29.0, "reach": 70.0, "dmg_ratio": 1.30, "slpm": 4.50, "td": 1.50, "cardio": 0.0, "layoff": 150.0, "cardio_nan": False, "short_notice": False})
         
         share_price = 50.0
         if mode == "Live Trading (With Polymarket Prices)":
-            share_price = st.number_input("Polymarket YES Price (1¢ to 99¢)", min_value=1.0, max_value=99.0, value=50.0, step=1.0, key=f"price_{label}")
+            share_price = st.number_input("Polymarket YES Price (1¢ to 99¢)", min_value=1.0, max_value=99.0, value=50.0, step=1.0, key=f"price_{corner_label}")
         
-        with st.expander("🛠️ Manual Metric Overrides (Tapology/UFCStats)", expanded=True):
-            elo = st.number_input("Elo", 1000.0, 2200.0, float(preset["elo"]), key=f"elo_{label}")
-            age = st.number_input("Age", 18.0, 50.0, float(preset["age"]), key=f"age_{label}")
-            reach = st.number_input("Reach", 55.0, 88.0, float(preset["reach"]), key=f"reach_{label}")
-            dmg_ratio = st.number_input("Damage Ratio", 0.1, 5.0, float(preset["dmg_ratio"]), key=f"dmg_{label}")
-            slpm = st.number_input("SLpM", 0.5, 12.0, float(preset["slpm"]), key=f"slpm_{label}")
-            td = st.number_input("TD / 15m", 0.0, 12.0, float(preset["td"]), key=f"td_{label}")
-            cardio_nan = st.checkbox("Untested R3 Cardio", value=preset["cardio_nan"], key=f"cnan_{label}")
-            cardio = st.number_input("Cardio Delta", -20.0, 20.0, float(preset["cardio"]), disabled=cardio_nan, key=f"card_{label}")
-            layoff = st.number_input("Layoff (Days)", 7.0, 1500.0, float(preset["layoff"]), key=f"lay_{label}")
+        with st.expander("🛠️ Metrics & Manual Overrides", expanded=True):
+            elo = st.number_input("Elo", 1000.0, 2200.0, float(preset["elo"]), key=f"elo_{corner_label}")
+            age = st.number_input("Age", 18.0, 50.0, float(preset["age"]), key=f"age_{corner_label}")
+            reach = st.number_input("Reach", 55.0, 88.0, float(preset["reach"]), key=f"reach_{corner_label}")
+            dmg_ratio = st.number_input("Damage Ratio", 0.1, 5.0, float(preset["dmg_ratio"]), key=f"dmg_{label if 'label' in locals() else corner_label}")
+            slpm = st.number_input("SLpM", 0.5, 12.0, float(preset["slpm"]), key=f"slpm_{corner_label}")
+            td = st.number_input("TD / 15m", 0.0, 12.0, float(preset["td"]), key=f"td_{corner_label}")
             
-        sn = st.checkbox("Short-Notice (<14 Days)", value=preset["short_notice"], key=f"sn_{label}")
-        bs = st.checkbox("Missed Weight / Drain", value=False, key=f"bs_{label}")
+            cardio_nan = st.checkbox("Untested R3 Cardio", value=bool(preset["cardio_nan"]), key=f"cnan_{corner_label}")
+            cardio = st.number_input("Cardio Delta", -20.0, 20.0, float(preset["cardio"]), disabled=cardio_nan, key=f"card_{corner_label}")
+            layoff = st.number_input("Layoff (Days)", 7.0, 1500.0, float(preset["layoff"]), key=f"lay_{corner_label}")
+            
+        sn = st.checkbox("Short-Notice (<14 Days)", value=bool(preset["short_notice"]), key=f"sn_{corner_label}")
+        bs = st.checkbox("Missed Weight / Drain", value=False, key=f"bs_{corner_label}")
         chaos_mod = (-0.28 if sn else 0.0) + (-0.22 if bs else 0.0)
         
-        return {"name": name, "share_price": share_price, "elo": elo, "age": age, "reach": reach, "dmg_ratio": dmg_ratio, "slpm": slpm, "td": td, "cardio": cardio, "cardio_nan": cardio_nan, "layoff": layoff, "chaos_mod": chaos_mod}
+        return {
+            "name": selected_name, "share_price": share_price, "elo": elo, "age": age, 
+            "reach": reach, "dmg_ratio": dmg_ratio, "slpm": slpm, "td": td, 
+            "cardio": cardio, "cardio_nan": cardio_nan, "layoff": layoff, "chaos_mod": chaos_mod
+        }
 
-f1 = render_fighter(col1, "Fighter A (Red Corner)", 0)
-f2 = render_fighter(col2, "Fighter B (Blue Corner)", 1)
+f1 = render_fighter_search_column(col1, "Fighter A (Red Corner)", default_idx=0)
+f2 = render_fighter_search_column(col2, "Fighter B (Blue Corner)", default_idx=1)
 st.divider()
 
 p_f1, p_f2 = predict_symmetric_probability(f1, f2)
@@ -110,15 +118,10 @@ p_f1, p_f2 = predict_symmetric_probability(f1, f2)
 if mode == "Pre-Market (Model Prob Only)":
     st.subheader("📊 True Model Probability Target")
     m1, m2 = st.columns(2)
-    m1.metric(f"{f1['name']} True Win Probability", f"{p_f1*100:.1f}%", f"Fair Polymarket Value: {p_f1*100:.0f}¢")
-    m2.metric(f"{f2['name']} True Win Probability", f"{p_f2*100:.1f}%", f"Fair Polymarket Value: {p_f2*100:.0f}¢")
+    m1.metric(f"{f1['name']} True Win Probability", f"{p_f1*100:.1f}%", f"Fair Value: {p_f1*100:.0f}¢")
+    m2.metric(f"{f2['name']} True Win Probability", f"{p_f2*100:.1f}%", f"Fair Value: {p_f2*100:.0f}¢")
     
-    st.info(
-        f"💡 **Pre-Market Strategy Note:**\n"
-        f"When Polymarket opens for **{f1['name']} vs. {f2['name']}**, "
-        f"any shares priced *below* **{p_f1*100:.0f}¢** for {f1['name']} represent a mathematical edge. "
-        f"Any shares priced *below* **{p_f2*100:.0f}¢** for {f2['name']} represent an edge for them."
-    )
+    st.info(f"💡 **Pre-Market Tip:** Look for shares priced below **{p_f1*100:.0f}¢** for {f1['name']} or below **{p_f2*100:.0f}¢** for {f2['name']} to secure an edge.")
 else:
     trade_f1 = calculate_polymarket_kelly(p_f1, f1["share_price"], bankroll, kelly_mult, max_bet_cap)
     trade_f2 = calculate_polymarket_kelly(p_f2, f2["share_price"], bankroll, kelly_mult, max_bet_cap)
@@ -128,8 +131,8 @@ else:
     m2.metric(f"{f2['name']} ({f2['share_price']:.0f}¢)", f"{p_f2*100:.1f}% Model Prob", f"{trade_f2['edge']*100:+.1f}% Edge")
 
     if trade_f1["edge"] >= min_edge and trade_f1["edge"] > trade_f2["edge"]:
-        st.success(f"### 🟢 BUY YES: {f1['name'].upper()} @ {f1['share_price']:.0f}¢ — **USDC ${trade_f1['investment']:,.2f}** (`{trade_f1['bet_pct']*100:.1f}%` Bankroll | ~{trade_f1['shares']} shares)")
+        st.success(f"### 🟢 BUY YES: {f1['name'].upper()} @ {f1['share_price']:.0f}¢ — **USDC ${trade_f1['investment']:,.2f}** (~{trade_f1['shares']} shares)")
     elif trade_f2["edge"] >= min_edge and trade_f2["edge"] > trade_f1["edge"]:
-        st.success(f"### 🟢 BUY YES: {f2['name'].upper()} @ {f2['share_price']:.0f}¢ — **USDC ${trade_f1['investment']:,.2f}** (`{trade_f2['bet_pct']*100:.1f}%` Bankroll | ~{trade_f2['shares']} shares)")
+        st.success(f"### 🟢 BUY YES: {f2['name'].upper()} @ {f2['share_price']:.0f}¢ — **USDC ${trade_f2['investment']:,.2f}** (~{trade_f2['shares']} shares)")
     else:
         st.warning("### ⚪ HOLD / PASS — Market is Efficient")
